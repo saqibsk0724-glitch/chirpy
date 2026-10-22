@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 )
 
@@ -23,7 +24,6 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 // Admin metrics page
 func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
 
 	html := fmt.Sprintf(`<html>
   <body>
@@ -32,6 +32,7 @@ func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
   </body>
 </html>`, cfg.fileserverHits.Load())
 
+	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(html))
 }
 
@@ -63,7 +64,26 @@ func respondWithError(w http.ResponseWriter, code int, msg string) {
 	})
 }
 
-// Validate chirp length
+// Replace profane words with ****
+func cleanProfanity(text string) string {
+	profaneWords := map[string]bool{
+		"kerfuffle": true,
+		"sharbert":  true,
+		"fornax":    true,
+	}
+
+	words := strings.Split(text, " ")
+
+	for i, word := range words {
+		if profaneWords[strings.ToLower(word)] {
+			words[i] = "****"
+		}
+	}
+
+	return strings.Join(words, " ")
+}
+
+// Validate chirp and return cleaned text
 func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Body string `json:"body"`
@@ -77,13 +97,16 @@ func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check length before cleaning
 	if len([]rune(params.Body)) > 140 {
 		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
 		return
 	}
 
-	respondWithJSON(w, http.StatusOK, map[string]bool{
-		"valid": true,
+	cleanedBody := cleanProfanity(params.Body)
+
+	respondWithJSON(w, http.StatusOK, map[string]string{
+		"cleaned_body": cleanedBody,
 	})
 }
 
