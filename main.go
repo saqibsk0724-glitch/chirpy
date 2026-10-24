@@ -74,6 +74,11 @@ type refreshResponse struct {
 	Token string `json:"token"`
 }
 
+type updateUserParams struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
 func main() {
 	godotenv.Load()
 
@@ -108,11 +113,13 @@ func main() {
 	// Users.
 	mux.HandleFunc("POST /api/users", cfg.handlerCreateUser)
 	mux.HandleFunc("POST /api/login", cfg.handlerLogin)
+	mux.HandleFunc("PUT /api/users", cfg.handlerUpdateUser)
 
 	// Chirps.
 	mux.HandleFunc("POST /api/chirps", cfg.handlerCreateChirp)
 	mux.HandleFunc("GET /api/chirps", cfg.handlerGetChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.handlerGetChirp)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", cfg.handlerDeleteChirp)
 
 	// Fileserver.
 	fileServer := http.FileServer(http.Dir("."))
@@ -128,6 +135,171 @@ func main() {
 	log.Println("Server listening on :8080")
 	log.Fatal(server.ListenAndServe())
 
+}
+
+func (cfg *apiConfig) handlerDeleteChirp(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	// 1. Get the access token from the Authorization header.
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Missing or invalid authorization token",
+		)
+		return
+	}
+
+	// 2. Validate the JWT and extract the authenticated user's ID.
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Invalid or expired token",
+		)
+		return
+	}
+
+	// 3. Get the chirp ID from the URL.
+	chirpID := r.PathValue("chirpID")
+
+	// 4. Convert the chirp ID into a UUID.
+	id, err := uuid.Parse(chirpID)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusBadRequest,
+			"Invalid chirp ID",
+		)
+		return
+	}
+
+	// 5. Fetch the chirp from the database.
+	chirp, err := cfg.dbQueries.GetChirp(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			respondWithError(
+				w,
+				http.StatusNotFound,
+				"Chirp not found",
+			)
+			return
+		}
+
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't get chirp",
+		)
+		return
+	}
+
+	// 6. Check whether the authenticated user is the author.
+	if chirp.UserID != userID {
+		respondWithError(
+			w,
+			http.StatusForbidden,
+			"You are not authorized to delete this chirp",
+		)
+		return
+	}
+
+	// 7. Delete the chirp.
+	err = cfg.dbQueries.DeleteChirp(r.Context(), id)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't delete chirp",
+		)
+		return
+	}
+
+	// 8. Return 204 No Content.
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handler update user
+func (cfg *apiConfig) handlerUpdateUser(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	// Get the access token from the Authorization header.
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Missing or invalid authorization token",
+		)
+		return
+	}
+
+	// Validate the JWT and extract the authenticated user's ID.
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Invalid or expired token",
+		)
+		return
+	}
+
+	// Decode the new email and password.
+	params := updateUserParams{}
+
+	err = json.NewDecoder(r.Body).Decode(&params)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusBadRequest,
+			"Invalid JSON",
+		)
+		return
+	}
+
+	// Hash the new password.
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't hash password",
+		)
+		return
+	}
+
+	// Update the authenticated user's email and password.
+	user, err := cfg.dbQueries.UpdateUser(
+		r.Context(),
+		database.UpdateUserParams{
+			Email:          params.Email,
+			HashedPassword: hashedPassword,
+			ID:             userID,
+		},
+	)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't update user",
+		)
+		return
+	}
+
+	// Return the updated user without the password hash.
+	apiUser := User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	}
+
+	respondWithJSON(w, http.StatusOK, apiUser)
 }
 
 func (cfg *apiConfig) handlerRefresh(
