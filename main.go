@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -142,12 +143,25 @@ func main() {
 
 }
 
+//secure the webhook handler
+
 //webhook handler
 
 func (cfg *apiConfig) handlerPolkaWebhooks(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+
+	// Check Api Key First
+
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil || apiKey != cfg.polkaKey {
+		respondWithJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "Unauthorized",
+		})
+		return
+	}
+
 	type webhookRequest struct {
 		Event string `json:"event"`
 		Data  struct {
@@ -158,7 +172,7 @@ func (cfg *apiConfig) handlerPolkaWebhooks(
 	// Decode the webhook request body.
 	var req webhookRequest
 
-	err := json.NewDecoder(r.Body).Decode(&req)
+	err = json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
 		respondWithError(
 			w,
@@ -544,6 +558,80 @@ func (cfg *apiConfig) handlerGetChirp(
 	respondWithJSON(w, http.StatusOK, apiChirp)
 }
 
+func (cfg *apiConfig) handlerGetChirps(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	// Get the optional author_id query parameter.
+	authorID := r.URL.Query().Get("author_id")
+
+	var chirps []database.Chirp
+	var err error
+
+	// If author_id is provided, fetch chirps by author.
+	if authorID != "" {
+		id, err := uuid.Parse(authorID)
+		if err != nil {
+			respondWithError(
+				w,
+				http.StatusBadRequest,
+				"Invalid author ID",
+			)
+			return
+		}
+
+		chirps, err = cfg.dbQueries.GetChirpsByAuthor(
+			r.Context(),
+			id,
+		)
+	} else {
+		// Otherwise, fetch all chirps.
+		chirps, err = cfg.dbQueries.GetChirps(r.Context())
+	}
+
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't get chirps",
+		)
+		return
+	}
+
+	sortOrder := r.URL.Query().Get("sort")
+
+	// Default sorting is ascending.
+	if sortOrder == "" {
+		sortOrder = "asc"
+	}
+
+	// Sort chirps in memory.
+	sort.Slice(chirps, func(i, j int) bool {
+		if sortOrder == "desc" {
+			return chirps[i].CreatedAt.After(chirps[j].CreatedAt)
+		}
+
+		return chirps[i].CreatedAt.Before(chirps[j].CreatedAt)
+	})
+
+	// Convert database chirps into API chirps.
+	apiChirps := make([]Chirp, 0, len(chirps))
+
+	for _, chirp := range chirps {
+		apiChirp := Chirp{
+			ID:        chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			UserID:    chirp.UserID,
+		}
+
+		apiChirps = append(apiChirps, apiChirp)
+	}
+
+	respondWithJSON(w, http.StatusOK, apiChirps)
+}
+
 func (cfg *apiConfig) handlerReset(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -715,36 +803,36 @@ func (cfg *apiConfig) handlerCreateChirp(
 	respondWithJSON(w, http.StatusCreated, apiChirp)
 }
 
-func (cfg *apiConfig) handlerGetChirps(
-	w http.ResponseWriter,
-	r *http.Request,
-) {
-	chirps, err := cfg.dbQueries.GetChirps(r.Context())
-	if err != nil {
-		respondWithError(
-			w,
-			http.StatusInternalServerError,
-			"Couldn't get chirps",
-		)
-		return
-	}
+// func (cfg *apiConfig) handlerGetChirps(
+// 	w http.ResponseWriter,
+// 	r *http.Request,
+// ) {
+// 	chirps, err := cfg.dbQueries.GetChirps(r.Context())
+// 	if err != nil {
+// 		respondWithError(
+// 			w,
+// 			http.StatusInternalServerError,
+// 			"Couldn't get chirps",
+// 		)
+// 		return
+// 	}
 
-	apiChirps := make([]Chirp, 0, len(chirps))
+// 	apiChirps := make([]Chirp, 0, len(chirps))
 
-	for _, chirp := range chirps {
-		apiChirp := Chirp{
-			ID:        chirp.ID,
-			CreatedAt: chirp.CreatedAt,
-			UpdatedAt: chirp.UpdatedAt,
-			Body:      chirp.Body,
-			UserID:    chirp.UserID,
-		}
+// 	for _, chirp := range chirps {
+// 		apiChirp := Chirp{
+// 			ID:        chirp.ID,
+// 			CreatedAt: chirp.CreatedAt,
+// 			UpdatedAt: chirp.UpdatedAt,
+// 			Body:      chirp.Body,
+// 			UserID:    chirp.UserID,
+// 		}
 
-		apiChirps = append(apiChirps, apiChirp)
-	}
+// 		apiChirps = append(apiChirps, apiChirp)
+// 	}
 
-	respondWithJSON(w, http.StatusOK, apiChirps)
-}
+// 	respondWithJSON(w, http.StatusOK, apiChirps)
+// }
 
 func (cfg *apiConfig) handlerLogin(
 	w http.ResponseWriter,

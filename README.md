@@ -1,79 +1,46 @@
+# Chirpy
 
-# Chirpy 🐦
+Chirpy is a RESTful API built with Go that allows users to create, manage, and retrieve short messages called chirps.
 
-Chirpy is a Twitter-like social media backend built from scratch using **Go (Golang)** without any web frameworks.
+This project was built as part of the [Boot.dev Learn HTTP Servers in Go course](https://www.boot.dev/), with a focus on learning backend development, HTTP APIs, authentication, database integration, and webhooks.
 
-The goal of this project is to understand how web servers work under the hood by building a backend using Go's standard library.
+## Features
 
-## 🚀 Features
+- Create and retrieve chirps
+- Retrieve all chirps or filter them by author
+- Sort chirps by creation time in ascending or descending order
+- User registration and login
+- Password hashing
+- JWT-based authentication
+- Refresh and revoke authentication tokens
+- Update user information
+- Chirpy Red account upgrades through secure Polka webhooks
+- PostgreSQL database integration
+- Database migrations using Goose
+- SQL query generation using SQLC
 
-- HTTP server built using Go's `net/http` package
-- RESTful API development
-- JSON request and response handling
-- User management
-- Chirps (short text posts, similar to tweets)
-- HTTP middleware
-- Database integration
-- Authentication and authorization
+## Technologies Used
 
-*Features are being implemented incrementally as the project develops.*
+- **Go** — Backend programming language
+- **PostgreSQL** — Relational database
+- **SQLC** — Type-safe Go code generation from SQL queries
+- **Goose** — Database migrations
+- **JWT** — Authentication
+- **Godotenv** — Environment variable configuration
 
-## 🛠️ Tech Stack
+## Getting Started
 
-- **Language:** Go (Golang) 1.22+
-- **HTTP Server:** Go standard library (`net/http`)
-- **Data Format:** JSON
-- **Version Control:** Git and GitHub
+### Prerequisites
 
-## 📋 Prerequisites
+Make sure you have the following installed:
 
-- Go 1.22 or higher
-- Git
+- Go
+- PostgreSQL
+- Goose
+- SQLC
 
-Check your Go installation:
-
-```bash
-go version
-```
-
-## ⚙️ Getting Started
-
-### Clone the repository
+### Clone the Repository
 
 ```bash
 git clone https://github.com/saqibsk0724-glitch/chirpy.git
 cd chirpy
-```
-
-### Run the server
-
-```bash
-go run .
-```
-
-## 🎯 Learning Objectives
-
-This project focuses on learning backend development by building a web server without a framework.
-
-- Understanding HTTP requests and responses
-- Building RESTful APIs
-- Learning routing and middleware
-- Working with JSON in Go
-- Managing application data
-- Integrating a database
-- Implementing authentication and authorization
-- Writing clean and maintainable Go code
-
-## 📚 Learning Resource
-
-This project is being developed as part of the [Boot.dev](https://www.boot.dev/) backend development curriculum.
-
-## 📌 Project Status
-
-**In Development** 🚧
-
-New features and improvements will be added as development progresses.
-
-## 📄 License
-
-No license specified yet.
