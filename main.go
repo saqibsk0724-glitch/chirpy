@@ -26,6 +26,7 @@ type apiConfig struct {
 	dbQueries      *database.Queries
 	platform       string
 	jwtSecret      string
+	polkaKey       string
 }
 
 type createUserParams struct {
@@ -38,10 +39,11 @@ type createChirpParams struct {
 }
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	ID          uuid.UUID `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 type Chirp struct {
@@ -68,6 +70,7 @@ type loginResponse struct {
 	Email        string    `json:"email"`
 	Token        string    `json:"token"`
 	RefreshToken string    `json:"refresh_token"`
+	IsChirpyRed  bool      `json:"is_chirpy_red"`
 }
 
 type refreshResponse struct {
@@ -99,6 +102,7 @@ func main() {
 		dbQueries: dbQueries,
 		platform:  os.Getenv("PLATFORM"),
 		jwtSecret: os.Getenv("JWT_SECRET"),
+		polkaKey:  os.Getenv("POLKA_KEY"),
 	}
 
 	mux := http.NewServeMux()
@@ -109,6 +113,7 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", cfg.handlerReset)
 	mux.HandleFunc("POST /api/refresh", cfg.handlerRefresh)
 	mux.HandleFunc("POST /api/revoke", cfg.handlerRevoke)
+	mux.HandleFunc("POST /api/polka/webhooks", cfg.handlerPolkaWebhooks)
 
 	// Users.
 	mux.HandleFunc("POST /api/users", cfg.handlerCreateUser)
@@ -135,6 +140,78 @@ func main() {
 	log.Println("Server listening on :8080")
 	log.Fatal(server.ListenAndServe())
 
+}
+
+//webhook handler
+
+func (cfg *apiConfig) handlerPolkaWebhooks(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	type webhookRequest struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID string `json:"user_id"`
+		} `json:"data"`
+	}
+
+	// Decode the webhook request body.
+	var req webhookRequest
+
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusBadRequest,
+			"Invalid request body",
+		)
+		return
+	}
+
+	// Ignore events we don't care about.
+	if req.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Parse the user ID.
+	userID, err := uuid.Parse(req.Data.UserID)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusBadRequest,
+			"Invalid user ID",
+		)
+		return
+	}
+
+	// Upgrade the user to Chirpy Red.
+	rowsAffected, err := cfg.dbQueries.UpgradeUserToChirpyRed(
+		r.Context(),
+		userID,
+	)
+
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Database error",
+		)
+		return
+	}
+
+	// Check whether the user exists.
+	if rowsAffected == 0 {
+		respondWithError(
+			w,
+			http.StatusNotFound,
+			"User not found",
+		)
+		return
+	}
+
+	// Successfully upgraded.
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (cfg *apiConfig) handlerDeleteChirp(
@@ -293,10 +370,11 @@ func (cfg *apiConfig) handlerUpdateUser(
 
 	// Return the updated user without the password hash.
 	apiUser := User{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
+		ID:          user.ID,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 
 	respondWithJSON(w, http.StatusOK, apiUser)
@@ -532,6 +610,9 @@ func (cfg *apiConfig) handlerCreateUser(
 		},
 	)
 	if err != nil {
+
+		log.Printf("Couldn't create user: %v", err)
+
 		respondWithError(
 			w,
 			http.StatusInternalServerError,
@@ -542,10 +623,11 @@ func (cfg *apiConfig) handlerCreateUser(
 
 	// Return the user without the password hash.
 	apiUser := User{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
+		ID:          user.ID,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 
 	respondWithJSON(w, http.StatusCreated, apiUser)
@@ -752,6 +834,7 @@ func (cfg *apiConfig) handlerLogin(
 		Email:        user.Email,
 		Token:        accessToken,
 		RefreshToken: refreshToken,
+		IsChirpyRed:  user.IsChirpyRed,
 	}
 
 	respondWithJSON(w, http.StatusOK, response)
