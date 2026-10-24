@@ -17,6 +17,7 @@ import (
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 
+	"github.com/saqibsk0724-glitch/chirpy/internal/auth"
 	"github.com/saqibsk0724-glitch/chirpy/internal/database"
 )
 
@@ -27,7 +28,8 @@ type apiConfig struct {
 }
 
 type createUserParams struct {
-	Email string `json:"email"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type createChirpParams struct {
@@ -52,6 +54,11 @@ type Chirp struct {
 
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+type loginParams struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 func main() {
@@ -84,6 +91,7 @@ func main() {
 
 	// Users.
 	mux.HandleFunc("POST /api/users", cfg.handlerCreateUser)
+	mux.HandleFunc("POST /api/login", cfg.handlerLogin)
 
 	// Chirps.
 	mux.HandleFunc("POST /api/chirps", cfg.handlerCreateChirp)
@@ -237,7 +245,25 @@ func (cfg *apiConfig) handlerCreateUser(
 		return
 	}
 
-	user, err := cfg.dbQueries.CreateUser(r.Context(), params.Email)
+	// Hash the password before storing it.
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't hash password",
+		)
+		return
+	}
+
+	// Create the user in the database.
+	user, err := cfg.dbQueries.CreateUser(
+		r.Context(),
+		database.CreateUserParams{
+			Email:          params.Email,
+			HashedPassword: hashedPassword,
+		},
+	)
 	if err != nil {
 		respondWithError(
 			w,
@@ -247,6 +273,7 @@ func (cfg *apiConfig) handlerCreateUser(
 		return
 	}
 
+	// Return the user without the password hash.
 	apiUser := User{
 		ID:        user.ID,
 		CreatedAt: user.CreatedAt,
@@ -342,6 +369,61 @@ func (cfg *apiConfig) handlerGetChirps(
 	}
 
 	respondWithJSON(w, http.StatusOK, apiChirps)
+}
+
+func (cfg *apiConfig) handlerLogin(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params := loginParams{}
+
+	err := json.NewDecoder(r.Body).Decode(&params)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusBadRequest,
+			"Invalid JSON",
+		)
+		return
+	}
+
+	// Find the user by email.
+	user, err := cfg.dbQueries.GetUserByEmail(
+		r.Context(),
+		params.Email,
+	)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Incorrect email or password",
+		)
+		return
+	}
+
+	// Check whether the password matches the stored hash.
+	match, err := auth.CheckPasswordHash(
+		params.Password,
+		user.HashedPassword,
+	)
+	if err != nil || !match {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Incorrect email or password",
+		)
+		return
+	}
+
+	// Return the user without the password hash.
+	apiUser := User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	}
+
+	respondWithJSON(w, http.StatusOK, apiUser)
 }
 
 func cleanProfaneWords(body string) string {
