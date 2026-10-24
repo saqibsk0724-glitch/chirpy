@@ -3,13 +3,13 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -24,12 +24,13 @@ type apiConfig struct {
 	platform       string
 }
 
-type chirpParams struct {
-	Body string `json:"body"`
-}
-
 type createUserParams struct {
 	Email string `json:"email"`
+}
+
+type createChirpParams struct {
+	Body   string    `json:"body"`
+	UserID uuid.UUID `json:"user_id"`
 }
 
 type User struct {
@@ -39,111 +40,115 @@ type User struct {
 	Email     string    `json:"email"`
 }
 
+type Chirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
+}
+
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
 func main() {
-	// Load environment variables from .env
-	if err := godotenv.Load(); err != nil {
-		log.Println("Warning: .env file not found")
-	}
+	godotenv.Load()
 
-	// Get database connection URL
 	dbURL := os.Getenv("DB_URL")
-	if dbURL == "" {
-		log.Fatal("DB_URL environment variable is not set")
-	}
-
-	// Get platform environment
-	platform := os.Getenv("PLATFORM")
-
-	// Open database connection
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
 
-	// Verify database connection
 	if err := db.Ping(); err != nil {
 		log.Fatal(err)
 	}
 
-	// Initialize SQLC queries
 	dbQueries := database.New(db)
 
-	// Initialize API configuration
-	cfg := apiConfig{
+	cfg := &apiConfig{
 		dbQueries: dbQueries,
-		platform:  platform,
+		platform:  os.Getenv("PLATFORM"),
 	}
 
-	// Create HTTP router
 	mux := http.NewServeMux()
 
-	// Fileserver
-	fileServer := http.FileServer(http.Dir("."))
-	mux.Handle(
-		"/app/",
-		cfg.middlewareMetricsInc(
-			http.StripPrefix("/app", fileServer),
-		),
-	)
-
-	// Health check endpoint
+	// Health and metrics.
 	mux.HandleFunc("GET /api/healthz", handlerReadiness)
-
-	// Admin endpoints
 	mux.HandleFunc("GET /admin/metrics", cfg.handlerMetrics)
 	mux.HandleFunc("POST /admin/reset", cfg.handlerReset)
 
-	// API endpoints
-	mux.HandleFunc("POST /api/validate_chirp", handlerValidateChirp)
+	// Users.
 	mux.HandleFunc("POST /api/users", cfg.handlerCreateUser)
 
-	// Start server
-	log.Println("Server starting on :8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	// Chirps.
+	mux.HandleFunc("POST /api/chirps", cfg.handlerCreateChirp)
+
+	// Fileserver.
+	fileServer := http.FileServer(http.Dir("."))
+	mux.Handle("/app/", cfg.middlewareMetricsInc(
+		http.StripPrefix("/app", fileServer),
+	))
+
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
+	}
+
+	log.Println("Server listening on :8080")
+	log.Fatal(server.ListenAndServe())
 }
 
-// Middleware to count fileserver hits
-func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg.fileserverHits.Add(1)
-		next.ServeHTTP(w, r)
-	})
-}
-
-// GET /api/healthz
 func handlerReadiness(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
 }
 
-// GET /admin/metrics
-func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-	html := fmt.Sprintf(`
-		<html>
-			<body>
-				<h1>Welcome, Chirpy Admin</h1>
-				<p>Chirpy has been visited %d times!</p>
-			</body>
-		</html>
-	`, cfg.fileserverHits.Load())
-
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(html))
+func (cfg *apiConfig) middlewareMetricsInc(
+	next http.Handler,
+) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg.fileserverHits.Add(1)
+		next.ServeHTTP(w, r)
+	})
 }
 
-// POST /admin/reset
-func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
-	// Only allow reset in development
+func (cfg *apiConfig) handlerMetrics(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+
+	hits := cfg.fileserverHits.Load()
+
+	w.Write([]byte(
+		"<html>" +
+			"<body>" +
+			"<h1>Welcome, Chirpy Admin</h1>" +
+			"<p>Chirpy has been visited " +
+			strings.TrimSpace(string(rune(hits))) +
+			" times!</p>" +
+			"</body>" +
+			"</html>",
+	))
+}
+
+func (cfg *apiConfig) handlerReset(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
 	if cfg.platform != "dev" {
-		respondWithError(w, http.StatusForbidden, "Forbidden")
+		respondWithError(
+			w,
+			http.StatusForbidden,
+			"Reset is only allowed in dev environment",
+		)
 		return
 	}
 
-	// Delete all users from the database
 	err := cfg.dbQueries.DeleteAllUsers(r.Context())
 	if err != nil {
 		respondWithError(
@@ -154,7 +159,6 @@ func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reset fileserver hit counter
 	cfg.fileserverHits.Store(0)
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -162,18 +166,23 @@ func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Hits reset to 0"))
 }
 
-// POST /api/users
-func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) {
-	decoder := json.NewDecoder(r.Body)
+func (cfg *apiConfig) handlerCreateUser(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params := createUserParams{}
 
-	var params createUserParams
-	if err := decoder.Decode(&params); err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+	err := json.NewDecoder(r.Body).Decode(&params)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusBadRequest,
+			"Invalid JSON",
+		)
 		return
 	}
 
-	// Create user using SQLC
-	dbUser, err := cfg.dbQueries.CreateUser(r.Context(), params.Email)
+	user, err := cfg.dbQueries.CreateUser(r.Context(), params.Email)
 	if err != nil {
 		respondWithError(
 			w,
@@ -183,51 +192,84 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Map database user to API User
-	user := User{
-		ID:        dbUser.ID,
-		CreatedAt: dbUser.CreatedAt,
-		UpdatedAt: dbUser.UpdatedAt,
-		Email:     dbUser.Email,
+	apiUser := User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
 	}
 
-	respondWithJSON(w, http.StatusCreated, user)
+	respondWithJSON(w, http.StatusCreated, apiUser)
 }
 
-// POST /api/validate_chirp
-func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
-	decoder := json.NewDecoder(r.Body)
+func (cfg *apiConfig) handlerCreateChirp(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params := createChirpParams{}
 
-	var params chirpParams
-	if err := decoder.Decode(&params); err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+	err := json.NewDecoder(r.Body).Decode(&params)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusBadRequest,
+			"Invalid JSON",
+		)
 		return
 	}
 
-	if len([]rune(params.Body)) > 140 {
-		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+	// Chirps cannot be longer than 140 characters.
+	if utf8.RuneCountInString(params.Body) > 140 {
+		respondWithError(
+			w,
+			http.StatusBadRequest,
+			"Chirp is too long",
+		)
 		return
 	}
 
-	cleanedBody := cleanProfanity(params.Body)
+	// Replace profane words with asterisks.
+	cleanedBody := cleanProfaneWords(params.Body)
 
-	respondWithJSON(w, http.StatusOK, map[string]string{
-		"cleaned_body": cleanedBody,
-	})
+	// Save the chirp in the database.
+	chirp, err := cfg.dbQueries.CreateChirp(
+		r.Context(),
+		database.CreateChirpParams{
+			Body:   cleanedBody,
+			UserID: params.UserID,
+		},
+	)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't create chirp",
+		)
+		return
+	}
+
+	apiChirp := Chirp{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+	}
+
+	respondWithJSON(w, http.StatusCreated, apiChirp)
 }
 
-// Replace exact profanity words with asterisks
-func cleanProfanity(text string) string {
-	profanityWords := map[string]bool{
+func cleanProfaneWords(body string) string {
+	profaneWords := map[string]bool{
 		"kerfuffle": true,
 		"sharbert":  true,
 		"fornax":    true,
 	}
 
-	words := strings.Split(text, " ")
+	words := strings.Fields(body)
 
 	for i, word := range words {
-		if profanityWords[strings.ToLower(word)] {
+		if profaneWords[strings.ToLower(word)] {
 			words[i] = "****"
 		}
 	}
@@ -235,14 +277,17 @@ func cleanProfanity(text string) string {
 	return strings.Join(words, " ")
 }
 
-// Write JSON response
-func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+func respondWithJSON(
+	w http.ResponseWriter,
+	code int,
+	payload interface{},
+) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		respondWithError(
 			w,
 			http.StatusInternalServerError,
-			"Something went wrong",
+			"Couldn't encode response",
 		)
 		return
 	}
@@ -252,9 +297,16 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Write(data)
 }
 
-// Write JSON error response
-func respondWithError(w http.ResponseWriter, code int, msg string) {
-	respondWithJSON(w, code, map[string]string{
-		"error": msg,
-	})
+func respondWithError(
+	w http.ResponseWriter,
+	code int,
+	msg string,
+) {
+	respondWithJSON(
+		w,
+		code,
+		errorResponse{
+			Error: msg,
+		},
+	)
 }
