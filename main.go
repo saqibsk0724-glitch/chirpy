@@ -9,7 +9,9 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 
@@ -19,10 +21,22 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	platform       string
 }
 
 type chirpParams struct {
 	Body string `json:"body"`
+}
+
+type createUserParams struct {
+	Email string `json:"email"`
+}
+
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
 }
 
 func main() {
@@ -36,6 +50,9 @@ func main() {
 	if dbURL == "" {
 		log.Fatal("DB_URL environment variable is not set")
 	}
+
+	// Get platform environment
+	platform := os.Getenv("PLATFORM")
 
 	// Open database connection
 	db, err := sql.Open("postgres", dbURL)
@@ -55,6 +72,7 @@ func main() {
 	// Initialize API configuration
 	cfg := apiConfig{
 		dbQueries: dbQueries,
+		platform:  platform,
 	}
 
 	// Create HTTP router
@@ -76,8 +94,9 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", cfg.handlerMetrics)
 	mux.HandleFunc("POST /admin/reset", cfg.handlerReset)
 
-	// Chirp validation endpoint
+	// API endpoints
 	mux.HandleFunc("POST /api/validate_chirp", handlerValidateChirp)
+	mux.HandleFunc("POST /api/users", cfg.handlerCreateUser)
 
 	// Start server
 	log.Println("Server starting on :8080")
@@ -118,11 +137,61 @@ func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
 
 // POST /admin/reset
 func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
+	// Only allow reset in development
+	if cfg.platform != "dev" {
+		respondWithError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	// Delete all users from the database
+	err := cfg.dbQueries.DeleteAllUsers(r.Context())
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't delete users",
+		)
+		return
+	}
+
+	// Reset fileserver hit counter
 	cfg.fileserverHits.Store(0)
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Hits reset to 0"))
+}
+
+// POST /api/users
+func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+
+	var params createUserParams
+	if err := decoder.Decode(&params); err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	// Create user using SQLC
+	dbUser, err := cfg.dbQueries.CreateUser(r.Context(), params.Email)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't create user",
+		)
+		return
+	}
+
+	// Map database user to API User
+	user := User{
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+	}
+
+	respondWithJSON(w, http.StatusCreated, user)
 }
 
 // POST /api/validate_chirp
@@ -170,7 +239,11 @@ func cleanProfanity(text string) string {
 func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	data, err := json.Marshal(payload)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Something went wrong",
+		)
 		return
 	}
 
