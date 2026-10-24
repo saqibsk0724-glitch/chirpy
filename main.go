@@ -25,6 +25,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	platform       string
+	jwtSecret      string
 }
 
 type createUserParams struct {
@@ -33,8 +34,7 @@ type createUserParams struct {
 }
 
 type createChirpParams struct {
-	Body   string    `json:"body"`
-	UserID uuid.UUID `json:"user_id"`
+	Body string `json:"body"`
 }
 
 type User struct {
@@ -57,8 +57,17 @@ type errorResponse struct {
 }
 
 type loginParams struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email            string `json:"email"`
+	Password         string `json:"password"`
+	ExpiresInSeconds int    `json:"expires_in_seconds"`
+}
+
+type loginResponse struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+	Token     string    `json:"token"`
 }
 
 func main() {
@@ -80,6 +89,7 @@ func main() {
 	cfg := &apiConfig{
 		dbQueries: dbQueries,
 		platform:  os.Getenv("PLATFORM"),
+		jwtSecret: os.Getenv("JWT_SECRET"),
 	}
 
 	mux := http.NewServeMux()
@@ -300,6 +310,29 @@ func (cfg *apiConfig) handlerCreateChirp(
 		return
 	}
 
+	// Get the Bearer token from the Authorization header.
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Missing or invalid authorization token",
+		)
+		return
+	}
+
+	// Validate the JWT and extract the user ID.
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Invalid or expired token",
+		)
+		return
+	}
+
+	// Validate the chirp length.
 	if utf8.RuneCountInString(params.Body) > 140 {
 		respondWithError(
 			w,
@@ -309,13 +342,15 @@ func (cfg *apiConfig) handlerCreateChirp(
 		return
 	}
 
+	// Clean profanity.
 	cleanedBody := cleanProfaneWords(params.Body)
 
+	// Create the chirp using the authenticated user's ID.
 	chirp, err := cfg.dbQueries.CreateChirp(
 		r.Context(),
 		database.CreateChirpParams{
 			Body:   cleanedBody,
-			UserID: params.UserID,
+			UserID: userID,
 		},
 	)
 	if err != nil {
@@ -329,6 +364,7 @@ func (cfg *apiConfig) handlerCreateChirp(
 		return
 	}
 
+	// Return the created chirp.
 	apiChirp := Chirp{
 		ID:        chirp.ID,
 		CreatedAt: chirp.CreatedAt,
@@ -415,15 +451,42 @@ func (cfg *apiConfig) handlerLogin(
 		return
 	}
 
-	// Return the user without the password hash.
-	apiUser := User{
+	// Set the expiration time.
+	expiresIn := time.Hour
+
+	if params.ExpiresInSeconds > 0 {
+		requestedDuration := time.Duration(params.ExpiresInSeconds) * time.Second
+
+		if requestedDuration < time.Hour {
+			expiresIn = requestedDuration
+		}
+	}
+
+	// Create the JWT.
+	token, err := auth.MakeJWT(
+		user.ID,
+		cfg.jwtSecret,
+		expiresIn,
+	)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't create token",
+		)
+		return
+	}
+
+	// Return the user and JWT.
+	response := loginResponse{
 		ID:        user.ID,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 		Email:     user.Email,
+		Token:     token,
 	}
 
-	respondWithJSON(w, http.StatusOK, apiUser)
+	respondWithJSON(w, http.StatusOK, response)
 }
 
 func cleanProfaneWords(body string) string {
