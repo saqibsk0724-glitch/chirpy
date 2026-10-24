@@ -3,9 +3,11 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -60,6 +62,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer db.Close()
 
 	if err := db.Ping(); err != nil {
 		log.Fatal(err)
@@ -84,6 +87,8 @@ func main() {
 
 	// Chirps.
 	mux.HandleFunc("POST /api/chirps", cfg.handlerCreateChirp)
+	mux.HandleFunc("GET /api/chirps", cfg.handlerGetChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.handlerGetChirp)
 
 	// Fileserver.
 	fileServer := http.FileServer(http.Dir("."))
@@ -119,21 +124,71 @@ func (cfg *apiConfig) handlerMetrics(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	hits := cfg.fileserverHits.Load()
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-
-	hits := cfg.fileserverHits.Load()
 
 	w.Write([]byte(
 		"<html>" +
 			"<body>" +
 			"<h1>Welcome, Chirpy Admin</h1>" +
 			"<p>Chirpy has been visited " +
-			strings.TrimSpace(string(rune(hits))) +
+			strconv.FormatInt(int64(hits), 10) +
 			" times!</p>" +
 			"</body>" +
 			"</html>",
 	))
+}
+
+func (cfg *apiConfig) handlerGetChirp(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	// Get the chirp ID from the URL.
+	chirpID := r.PathValue("chirpID")
+
+	// Convert the string ID into a UUID.
+	id, err := uuid.Parse(chirpID)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusBadRequest,
+			"Invalid chirp ID",
+		)
+		return
+	}
+
+	// Fetch the chirp from the database.
+	chirp, err := cfg.dbQueries.GetChirp(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			respondWithError(
+				w,
+				http.StatusNotFound,
+				"Chirp not found",
+			)
+			return
+		}
+
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't get chirp",
+		)
+		return
+	}
+
+	// Convert the database chirp into the API response.
+	apiChirp := Chirp{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+	}
+
+	respondWithJSON(w, http.StatusOK, apiChirp)
 }
 
 func (cfg *apiConfig) handlerReset(
@@ -218,7 +273,6 @@ func (cfg *apiConfig) handlerCreateChirp(
 		return
 	}
 
-	// Chirps cannot be longer than 140 characters.
 	if utf8.RuneCountInString(params.Body) > 140 {
 		respondWithError(
 			w,
@@ -228,10 +282,8 @@ func (cfg *apiConfig) handlerCreateChirp(
 		return
 	}
 
-	// Replace profane words with asterisks.
 	cleanedBody := cleanProfaneWords(params.Body)
 
-	// Save the chirp in the database.
 	chirp, err := cfg.dbQueries.CreateChirp(
 		r.Context(),
 		database.CreateChirpParams{
@@ -240,6 +292,8 @@ func (cfg *apiConfig) handlerCreateChirp(
 		},
 	)
 	if err != nil {
+		log.Printf("Error creating chirp: %v", err)
+
 		respondWithError(
 			w,
 			http.StatusInternalServerError,
@@ -257,6 +311,37 @@ func (cfg *apiConfig) handlerCreateChirp(
 	}
 
 	respondWithJSON(w, http.StatusCreated, apiChirp)
+}
+
+func (cfg *apiConfig) handlerGetChirps(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	chirps, err := cfg.dbQueries.GetChirps(r.Context())
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't get chirps",
+		)
+		return
+	}
+
+	apiChirps := make([]Chirp, 0, len(chirps))
+
+	for _, chirp := range chirps {
+		apiChirp := Chirp{
+			ID:        chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			UserID:    chirp.UserID,
+		}
+
+		apiChirps = append(apiChirps, apiChirp)
+	}
+
+	respondWithJSON(w, http.StatusOK, apiChirps)
 }
 
 func cleanProfaneWords(body string) string {
