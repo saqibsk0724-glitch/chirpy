@@ -57,17 +57,21 @@ type errorResponse struct {
 }
 
 type loginParams struct {
-	Email            string `json:"email"`
-	Password         string `json:"password"`
-	ExpiresInSeconds int    `json:"expires_in_seconds"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type loginResponse struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-	Token     string    `json:"token"`
+	ID           uuid.UUID `json:"id"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Email        string    `json:"email"`
+	Token        string    `json:"token"`
+	RefreshToken string    `json:"refresh_token"`
+}
+
+type refreshResponse struct {
+	Token string `json:"token"`
 }
 
 func main() {
@@ -98,6 +102,8 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", handlerReadiness)
 	mux.HandleFunc("GET /admin/metrics", cfg.handlerMetrics)
 	mux.HandleFunc("POST /admin/reset", cfg.handlerReset)
+	mux.HandleFunc("POST /api/refresh", cfg.handlerRefresh)
+	mux.HandleFunc("POST /api/revoke", cfg.handlerRevoke)
 
 	// Users.
 	mux.HandleFunc("POST /api/users", cfg.handlerCreateUser)
@@ -121,12 +127,91 @@ func main() {
 
 	log.Println("Server listening on :8080")
 	log.Fatal(server.ListenAndServe())
+
+}
+
+func (cfg *apiConfig) handlerRefresh(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Invalid refresh token",
+		)
+		return
+	}
+
+	user, err := cfg.dbQueries.GetUserFromRefreshToken(
+		r.Context(),
+		refreshToken,
+	)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Invalid refresh token",
+		)
+		return
+	}
+
+	accessToken, err := auth.MakeJWT(
+		user.ID,
+		cfg.jwtSecret,
+		time.Hour,
+	)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't create access token",
+		)
+		return
+	}
+
+	respondWithJSON(
+		w,
+		http.StatusOK,
+		refreshResponse{Token: accessToken},
+	)
 }
 
 func handlerReadiness(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
+}
+
+func (cfg *apiConfig) handlerRevoke(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusUnauthorized,
+			"Invalid refresh token",
+		)
+		return
+	}
+
+	err = cfg.dbQueries.RevokeRefreshToken(
+		r.Context(),
+		refreshToken,
+	)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't revoke refresh token",
+		)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(
@@ -451,39 +536,50 @@ func (cfg *apiConfig) handlerLogin(
 		return
 	}
 
-	// Set the expiration time.
-	expiresIn := time.Hour
-
-	if params.ExpiresInSeconds > 0 {
-		requestedDuration := time.Duration(params.ExpiresInSeconds) * time.Second
-
-		if requestedDuration < time.Hour {
-			expiresIn = requestedDuration
-		}
-	}
-
-	// Create the JWT.
-	token, err := auth.MakeJWT(
+	// Create the access token (valid for 1 hour).
+	accessToken, err := auth.MakeJWT(
 		user.ID,
 		cfg.jwtSecret,
-		expiresIn,
+		time.Hour,
 	)
 	if err != nil {
 		respondWithError(
 			w,
 			http.StatusInternalServerError,
-			"Couldn't create token",
+			"Couldn't create access token",
 		)
 		return
 	}
 
-	// Return the user and JWT.
+	// Create the refresh token.
+	refreshToken := auth.MakeRefreshToken()
+
+	// Store the refresh token (valid for 60 days).
+	_, err = cfg.dbQueries.CreateRefreshToken(
+		r.Context(),
+		database.CreateRefreshTokenParams{
+			Token:     refreshToken,
+			UserID:    user.ID,
+			ExpiresAt: time.Now().UTC().Add(60 * 24 * time.Hour),
+		},
+	)
+	if err != nil {
+		respondWithError(
+			w,
+			http.StatusInternalServerError,
+			"Couldn't create refresh token",
+		)
+		return
+	}
+
+	// Return the user, access token, and refresh token.
 	response := loginResponse{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
-		Token:     token,
+		ID:           user.ID,
+		CreatedAt:    user.CreatedAt,
+		UpdatedAt:    user.UpdatedAt,
+		Email:        user.Email,
+		Token:        accessToken,
+		RefreshToken: refreshToken,
 	}
 
 	respondWithJSON(w, http.StatusOK, response)
